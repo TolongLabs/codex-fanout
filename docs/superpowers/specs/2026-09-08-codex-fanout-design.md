@@ -32,7 +32,7 @@ The implementation must use this source-to-Codex mapping:
 | --- | --- |
 | Claude Code `claude -p` | `codex exec` |
 | CLIProxyAPI/OpenRouter model catalog | the locally configured Codex model, optionally selected with `-m` |
-| `CLAUDE_CONFIG_DIR` | `--ignore-user-config` while retaining `CODEX_HOME` authentication |
+| `CLAUDE_CONFIG_DIR` | `--ignore-user-config --ignore-rules` while retaining `CODEX_HOME` authentication |
 | Claude `acceptEdits` | `--sandbox workspace-write` |
 | Claude `--max-turns` | external `timeout 1500` |
 | Claude final JSON result | Codex JSONL from `--json` plus the final response from `--output-last-message` |
@@ -41,12 +41,17 @@ The published `README.md` and `SKILL.md` must not contain operational references
 `CLIProxyAPI`, `Anthropic`, `OpenRouter`, `ANTHROPIC_*`, `CLAUDE_CONFIG_DIR`, `claude -p`, `acceptEdits`, or
 `--max-turns`. The source URL may appear only in the design record, which is removed before publication.
 
+During implementation, the pinned source is cloned from
+`https://github.com/TolongLabs/claude-fanout.git` into the ignored path `reference/claude-fanout` and checked out at
+`f1431e2f6ba0fd0fc9130981dde06ff4b476a644`. The reference directory is removed from the final public tree.
+
 ## Codex-specific operating model
 
 Workers run with `codex exec`, not Claude Code. The documented default invocation will:
 
 - run from a dedicated Git worktree using `-C`;
-- isolate user configuration with `--ignore-user-config` while retaining the user's Codex authentication;
+- isolate user configuration and user/project execpolicy rules with `--ignore-user-config --ignore-rules` while
+  retaining the user's Codex authentication;
 - avoid persistent worker sessions with `--ephemeral`;
 - use `--sandbox workspace-write` for normal worktree edits; `codex exec` is non-interactive, so the command must not
   include the interactive-only `--ask-for-approval` flag;
@@ -55,27 +60,31 @@ Workers run with `codex exec`, not Claude Code. The documented default invocatio
 - wrap the process in `timeout 1500` because Codex CLI has no Claude-style `--max-turns` flag;
 - accept the brief through stdin from a file and redirect stdout/stderr to a per-worker log.
 
-`CODEX_HOME` remains the source of authentication. `--ignore-user-config` is the documented isolation mechanism for
-not loading the operator's normal `config.toml`, MCP servers, and other user-level configuration into workers.
+`CODEX_HOME` remains the source of authentication. `--ignore-user-config --ignore-rules` is the documented isolation
+mechanism for not loading the operator's normal `config.toml`, MCP servers, user rules, or project rules into workers.
+Because the ignored config also contains the default model, the orchestrator must set `MODEL` explicitly and pass
+`-m "$MODEL"`; the skill will tell the operator to choose a model accepted by the locally authenticated Codex account.
 
 The normative command template is:
 
 ```bash
 timeout 1500 codex exec \
   -C "$WORKTREE" \
+  -m "$MODEL" \
   --ignore-user-config \
+  --ignore-rules \
   --ephemeral \
   --sandbox workspace-write \
   --json \
   --output-last-message "$REPORT" \
   - < "$BRIEF" \
-  > "$LOG" 2>&1
+  > "$LOG" 2> "$ERR"
 STATUS=$?
 ```
 
-`$BRIEF`, `$LOG`, and `$REPORT` are absolute paths; `$WORKTREE` is the worker's dedicated Git worktree. The optional
-`-m "$MODEL"` is placed after `codex exec` when the operator selects a model. The command assumes Codex CLI 0.153.4
-or newer and requires implementers to re-check `codex exec --help` if the CLI changes.
+`$BRIEF`, `$LOG`, `$ERR`, and `$REPORT` are absolute paths; `$WORKTREE` is the worker's dedicated Git worktree;
+`$MODEL` is required because user config is ignored. The command assumes Codex CLI 0.153.4 or newer and requires
+implementers to re-check `codex exec --help` if the CLI changes.
 
 The skill will document `--dangerously-bypass-approvals-and-sandbox` only for disposable scratch directories, never as
 the normal repository mode. It will explain that worker model selection is an optional `-m` argument governed by the
@@ -110,6 +119,8 @@ unverified; a missing or empty final-response file is a failed worker; rejected 
 reported; unexpected files, commits, or edits outside the brief are review failures; and the orchestrator must inspect
 `git status` and run tests independently before merging.
 
+The timeout is a wall-clock guard, not a turn budget; a stuck worker can still spend model quota until 1500 seconds.
+
 On any of those failures, the orchestrator does not merge the worktree. It preserves the log and report for diagnosis,
 then either removes the disposable worktree after inspection or re-runs with a corrected brief; retries are explicit,
 not automatic. A worker that ran `git` or created unexpected files is treated as untrusted until the orchestrator has
@@ -126,17 +137,18 @@ scheduler or test framework to the published five-file tree. Its fixture is exac
 - `brief.md`: “Read `AGENTS.md`. Create exactly the file it requests. Do not run git. Report the created filename and
   its exact contents.”
 
-The test initializes the fixture on branch `main`, creates worktree
+The test runs `git init -b main`, commits the fixture files, creates worktree
 `/tmp/codex-fanout-smoke-<pid>/wt-smoke` with
-`git worktree add -b smoke-worker .../wt-smoke main`, then runs the documented command with
-`--ignore-user-config`, `--ephemeral`, `--sandbox workspace-write`, `--json`, `--output-last-message`, and
-`timeout 1500`; it passes
-only when exit status is zero, exit status is not 124, the final-response file is non-empty, no error/denial event is
-present in the JSONL log, the expected file has exact contents, the sentinel is unchanged, and `git status` shows only
-the requested file. A second read-only check will run the published skill validator:
+`git worktree add -b smoke-worker /tmp/codex-fanout-smoke-<pid>/wt-smoke main`, then runs the normative command with
+the fixture's `$MODEL`, `$BRIEF`, `$LOG`, `$ERR`, and `$REPORT`; it passes only when exit status is zero, exit status is
+not 124, the final-response file is non-empty, every non-empty `$LOG` line parses as JSON, no parsed event has a type
+of `error` or `turn.failed`, `$ERR` contains no rejected-tool or sandbox-denial text, the expected file has exact
+contents, the sentinel is unchanged, and `git status --porcelain` shows only the requested file. A second read-only
+check will run the published skill validator:
 `python /home/adam/.codex/skills/.system/skill-creator/scripts/quick_validate.py /home/adam/.codex/skills/codex-fanout`
 and require exit status zero. The skill is installed for that check by copying the published tree to
-`/home/adam/.codex/skills/codex-fanout` after the process-only spec file has been removed.
+`/home/adam/.codex/skills/codex-fanout` after the process-only spec file has been removed. The skill frontmatter must
+be exactly a YAML block with `name: codex-fanout` and a trigger-focused `description:`.
 
 `SKILL.md` is the normative runtime contract; `README.md` is the standalone public explanation and must keep its
 command, flags, safety model, and failure semantics aligned with `SKILL.md`. The banner is non-executable presentation
@@ -151,8 +163,8 @@ The published `.gitignore` will contain concrete patterns for `reference/`, `.wo
 
 After implementation and verification:
 
-1. install/copy the skill into the local Codex skills directory for a real harness invocation;
-2. run the smoke test from `/home/adam/CS/sandbox/codex-fanout` and review all generated artifacts;
-3. remove the process-only design record from the published tree, while retaining its earlier commit;
+1. remove the process-only design record from the published tree, while retaining its earlier commit;
+2. copy the published tree into `/home/adam/.codex/skills/codex-fanout` for a real harness invocation;
+3. run the smoke test from `/home/adam/CS/sandbox/codex-fanout` and review all generated artifacts;
 4. commit the repository on `main`;
 5. push `main` to `https://github.com/TolongLabs/codex-fanout.git`.
