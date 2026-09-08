@@ -72,6 +72,8 @@ Explain that `$MODEL` is required, `$CODEX_HOME` retains authentication, `--igno
 
 Document: six-worker ceiling; one worktree/brief/log/error/report per worker; `git worktree add` and `git worktree remove` are orchestrator responsibilities; no overlapping ownership; “and nothing else” plus “do not run git” in every brief; no merge on non-zero/124 exit, missing report, denial, unexpected files, or failed tests; preserve logs for diagnosis; independently run tests; and never quote worker cost metadata.
 
+Also document `--dangerously-bypass-approvals-and-sandbox` only for disposable scratch directories, never for a normal repository worktree.
+
 - [ ] **Step 4: Check the forbidden-term boundary**
 
 Run a case-insensitive scan over `SKILL.md` and ensure operational content contains none of: `Claude`, `Claude Code`, `CLIProxyAPI`, `Anthropic`, `OpenRouter`, `ANTHROPIC_`, `CLAUDE_CONFIG_DIR`, `claude -p`, `acceptEdits`, or `--max-turns`.
@@ -150,11 +152,18 @@ Copy the final skill directory to `/home/adam/.codex/skills/codex-fanout` for th
 - External temporary script: `/tmp/codex-fanout-smoke.sh`
 - External fixture: `/tmp/codex-fanout-smoke-<pid>/`
 
-- [ ] **Step 1: Create the exact fixture**
+- [ ] **Step 1: Write the reproducible smoke script**
 
-Run `git init -b main`; create `AGENTS.md` instructing the worker to create only `worker-output.txt` with exact contents `codex-fanout smoke pass\n` and not run git; create tracked `sentinel.txt` containing exactly `untouched\n`; create `brief.md` requesting that exact task; commit the fixture.
+Create `/tmp/codex-fanout-smoke.sh` as an executable script with `set -euo pipefail`, a disposable root at
+`/tmp/codex-fanout-smoke-$$`, and cleanup only after assertions pass. The script must contain the fixture creation,
+worktree creation, normative dispatch, assertions, and cleanup from the following steps; it is not added to the
+published repository.
 
-- [ ] **Step 2: Create the disposable worktree**
+- [ ] **Step 2: Create the exact fixture**
+
+Run `git init -b main`; create `AGENTS.md` with exactly: `For this smoke test, create only worker-output.txt with exactly codex-fanout smoke pass followed by a newline. Do not edit any other file and do not run git.` Create tracked `sentinel.txt` containing exactly `untouched\n`; create `brief.md` requesting that exact task; commit the fixture.
+
+- [ ] **Step 3: Create the disposable worktree**
 
 Run:
 
@@ -162,15 +171,15 @@ Run:
 git worktree add -b smoke-worker /tmp/codex-fanout-smoke-<pid>/wt-smoke main
 ```
 
-- [ ] **Step 3: Run the documented command**
+- [ ] **Step 4: Run the documented command**
 
 Use `MODEL="${CODEX_FANOUT_MODEL:-gpt-5.6-sol}"`, absolute `$BRIEF`, `$LOG`, `$ERR`, and `$REPORT` paths, and the exact normative command. Capture the process status and preserve the artifacts until all checks pass.
 
-- [ ] **Step 4: Assert observable behavior**
+- [ ] **Step 5: Assert observable behavior**
 
-Require exit 0; a non-empty report; every non-empty log line parses as JSON; no `error` or `turn.failed` event; stderr matches none of `rejected a tool call`, `sandbox.*denied`, `permission.*denied`, `approval.*required`, or `network.*blocked`; exact output file contents; unchanged sentinel; and `git status --porcelain` showing only `worker-output.txt`.
+Run `test "$STATUS" -eq 0`; `test -s "$REPORT"`; `jq -e -c . < "$LOG" > /dev/null`; `jq -e -s 'all(.[]; ((.type // "") != "error" and (.type // "") != "turn.failed"))' "$LOG" > /dev/null`; `! grep -iE -q 'rejected a tool call|sandbox.*denied|permission.*denied|approval.*required|network.*blocked' "$ERR"`; `diff -u <(printf 'codex-fanout smoke pass\n') "$WORKTREE/worker-output.txt"`; `diff -u <(printf 'untouched\n') "$WORKTREE/sentinel.txt"`; and `test "$(git -C "$WORKTREE" status --porcelain)" = "?? worker-output.txt"`.
 
-- [ ] **Step 5: Remove smoke artifacts**
+- [ ] **Step 6: Remove smoke artifacts**
 
 After recording the evidence, remove the disposable worktree, fixture directory, and `/tmp/codex-fanout-smoke.sh`. Preserve no generated logs in the published tree.
 
@@ -185,18 +194,23 @@ Run `git status --short`, `git diff --check`, `git diff --stat`, forbidden-term 
 
 - [ ] **Step 2: Commit the published skill**
 
-Create a Conventional Commit such as:
+Create a Conventional Commit such as, after confirming `git status --short` contains only the intended published files and the two planned deletions:
 
 ```bash
-git add README.md SKILL.md .gitignore LICENSE assets/codex-fanout-banner.png
+git add -A
 git commit -m "feat: add codex fanout skill"
 ```
 
 - [ ] **Step 3: Verify the remote before pushing**
 
-Run `git ls-remote origin` and confirm `origin` is `https://github.com/TolongLabs/codex-fanout.git`.
+Run `git remote get-url origin` and confirm the output is `https://github.com/TolongLabs/codex-fanout.git`.
 
 - [ ] **Step 4: Push main**
 
-Run `git push -u origin main`. Report the pushed commit SHA and the smoke-test evidence; do not claim success from the push exit code alone without checking the remote ref afterward.
+Run `git push -u origin main`, then verify the remote ref with:
 
+```bash
+test "$(git ls-remote origin refs/heads/main | awk '{print $1}')" = "$(git rev-parse main)"
+```
+
+Report the pushed commit SHA and the smoke-test evidence; do not claim success from the push exit code alone without the ref check.
