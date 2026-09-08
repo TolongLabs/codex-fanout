@@ -2,7 +2,8 @@
 
 **Date:** 2026-09-08
 
-**Source model:** Adapt the TolongLabs `claude-fanout` standalone skill repository for the OpenAI Codex CLI harness.
+**Source model:** Adapt `https://github.com/TolongLabs/claude-fanout` at source revision
+`f1431e2f6ba0fd0fc9130981dde06ff4b476a644` for the OpenAI Codex CLI harness.
 
 ## Goal
 
@@ -32,11 +33,15 @@ Workers run with `codex exec`, not Claude Code. The documented default invocatio
 - run from a dedicated Git worktree using `-C`;
 - isolate user configuration with `--ignore-user-config` while retaining the user's Codex authentication;
 - avoid persistent worker sessions with `--ephemeral`;
-- use `--sandbox workspace-write` and `--ask-for-approval never` for normal worktree edits;
+- use `--sandbox workspace-write` for normal worktree edits; `codex exec` is non-interactive, so the command must not
+  include the interactive-only `--ask-for-approval` flag;
 - emit machine-readable JSONL with `--json`;
 - save the final worker response with `--output-last-message`;
-- wrap the process in `timeout` because Codex CLI has no Claude-style `--max-turns` flag;
+- wrap the process in `timeout 1500` because Codex CLI has no Claude-style `--max-turns` flag;
 - accept the brief through stdin from a file and redirect stdout/stderr to a per-worker log.
+
+`CODEX_HOME` remains the source of authentication. `--ignore-user-config` is the documented isolation mechanism for
+not loading the operator's normal `config.toml`, MCP servers, and other user-level configuration into workers.
 
 The skill will document `--dangerously-bypass-approvals-and-sandbox` only for disposable scratch directories, never as
 the normal repository mode. It will explain that worker model selection is an optional `-m` argument governed by the
@@ -58,6 +63,10 @@ The orchestrating agent creates each worktree before dispatch with
 merges, or removes worktrees. The README and skill will show the single-worker command and parallelization rules. They
 will not implement a long-running scheduler or daemon.
 
+Sequential dispatch for dependent chunks will remain supported by running the same command one worker at a time and
+using the prior worktree or merged result as the next worker's base. Parallel dispatch is preferred only when file
+ownership is independent.
+
 The README and skill will document the same failure contract: a timeout is exit 124; any non-zero worker exit is
 unverified; a missing or empty final-response file is a failed worker; rejected tool calls or sandbox denials must be
 reported; unexpected files, commits, or edits outside the brief are review failures; and the orchestrator must inspect
@@ -65,11 +74,11 @@ reported; unexpected files, commits, or edits outside the brief are review failu
 
 ## Verification
 
-The external smoke test will run a real `codex exec` worker in a disposable Git worktree, without adding a scheduler or
-test framework to the published five-file tree. The fixture will contain an `AGENTS.md`, a brief requesting exactly one
+The external smoke test will run a real `codex exec` worker in a disposable Git worktree under `/tmp`, without adding a
+scheduler or test framework to the published five-file tree. The fixture will contain an `AGENTS.md`, a brief requesting exactly one
 file named `worker-output.txt` with the text `codex-fanout smoke pass`, and a tracked sentinel that must remain
 unchanged. The test will use the documented command with `--ignore-user-config`, `--ephemeral`,
-`--sandbox workspace-write`, `--ask-for-approval never`, `--json`, `--output-last-message`, and `timeout`; it passes
+`--sandbox workspace-write`, `--json`, `--output-last-message`, and `timeout 1500`; it passes
 only when exit status is zero, exit status is not 124, the final-response file is non-empty, no error/denial event is
 present in the JSONL log, the expected file has exact contents, the sentinel is unchanged, and `git status` shows only
 the requested file. A second read-only check will run the published skill validator:
@@ -78,7 +87,9 @@ status zero.
 
 `SKILL.md` is the normative runtime contract; `README.md` is the standalone public explanation and must keep its
 command, flags, safety model, and failure semantics aligned with `SKILL.md`. The banner is non-executable presentation
-content and will be accepted if it is a readable horizontal Codex Fan-Out image with no Claude/provider branding.
+content and will be created by editing the source banner's composition or generating an equivalent image; it will be
+accepted if it is a readable horizontal Codex Fan-Out image with no Claude/provider branding. `LICENSE` will name
+TolongLabs as copyright holder, and the final push assumes GitHub credentials are already available to Git.
 
 ## Delivery
 
