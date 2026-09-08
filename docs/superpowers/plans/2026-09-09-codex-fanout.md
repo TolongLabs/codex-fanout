@@ -123,7 +123,8 @@ Run:
 python /home/adam/.codex/skills/.system/skill-creator/scripts/quick_validate.py .
 ```
 
-Expected: exit 0 with no frontmatter or scaffold-placeholder errors.
+Expected: exit 0 with no frontmatter or scaffold-placeholder errors. This is a structural skill check; the final
+published-tree check happens after process-only docs and the ignored source reference are removed.
 
 - [ ] **Step 2: Run documentation integrity checks**
 
@@ -140,7 +141,9 @@ Check `git diff --check`, compare command blocks in `README.md` and `SKILL.md`, 
 
 - [ ] **Step 1: Preserve the planning commits and clean the public tree**
 
-Remove the process-only docs from the working tree without rewriting earlier commits. Move any ignored reference checkout out of the repository so the final tree contains only the five source-compatible files and asset.
+Remove the process-only docs from the working tree without rewriting earlier commits. Confirm `reference/` is ignored,
+then delete the exact generated path `reference/claude-fanout/` so the final tree contains only the five
+source-compatible files and asset.
 
 - [ ] **Step 2: Install the exact published tree**
 
@@ -154,10 +157,11 @@ Copy the final skill directory to `/home/adam/.codex/skills/codex-fanout` for th
 
 - [ ] **Step 1: Write the reproducible smoke script**
 
-Create `/tmp/codex-fanout-smoke.sh` as an executable script with `set -euo pipefail`, a disposable root at
-`/tmp/codex-fanout-smoke-$$`, and cleanup only after assertions pass. The script must contain the fixture creation,
-worktree creation, normative dispatch, assertions, and cleanup from the following steps; it is not added to the
-published repository.
+Create `/tmp/codex-fanout-smoke.sh` with `set -euo pipefail`, a disposable root at `/tmp/codex-fanout-smoke-$$`, and
+`chmod +x /tmp/codex-fanout-smoke.sh`. The script must contain the fixture creation, worktree creation, normative
+dispatch, assertions, and cleanup from the following steps; it is not added to the published repository. Do not use an
+automatic cleanup trap that destroys evidence on failure: leave the fixture, worktree, log, stderr, and report for
+inspection when an assertion fails, then remove them manually after recording the result.
 
 - [ ] **Step 2: Create the exact fixture**
 
@@ -173,7 +177,11 @@ git worktree add -b smoke-worker /tmp/codex-fanout-smoke-<pid>/wt-smoke main
 
 - [ ] **Step 4: Run the documented command**
 
-Use `MODEL="${CODEX_FANOUT_MODEL:-gpt-5.6-sol}"`, absolute `$BRIEF`, `$LOG`, `$ERR`, and `$REPORT` paths, and the exact normative command. Capture the process status and preserve the artifacts until all checks pass.
+Assign `WORKTREE="$SMOKE_ROOT/wt-smoke"`, `BRIEF="$SMOKE_ROOT/fixture/brief.md"`, `LOG="$SMOKE_ROOT/worker.jsonl"`,
+`ERR="$SMOKE_ROOT/worker.stderr"`, `REPORT="$SMOKE_ROOT/worker.report"`, and
+`MODEL="${CODEX_FANOUT_MODEL:-gpt-5.6-sol}"`; all paths must be absolute. Run the exact normative command inside an
+`if timeout 1500 codex exec ...; then STATUS=0; else STATUS=$?; fi` conditional so `set -e` does not abort before the
+status is captured. Preserve all artifacts until the assertions pass or the failure has been diagnosed.
 
 - [ ] **Step 5: Assert observable behavior**
 
@@ -181,7 +189,9 @@ Run `test "$STATUS" -eq 0`; `test -s "$REPORT"`; `jq -e -c . < "$LOG" > /dev/nul
 
 - [ ] **Step 6: Remove smoke artifacts**
 
-After recording the evidence, remove the disposable worktree, fixture directory, and `/tmp/codex-fanout-smoke.sh`. Preserve no generated logs in the published tree.
+After recording the evidence, and only after the assertions pass or the failure has been diagnosed, remove the
+disposable worktree, fixture directory, and `/tmp/codex-fanout-smoke.sh`. Preserve no generated logs in the published
+tree.
 
 ### Task 8: Review, commit, and push
 
