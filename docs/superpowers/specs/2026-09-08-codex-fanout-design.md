@@ -12,7 +12,7 @@ and independent verification. Every provider-specific instruction must target Co
 
 ## Scope
 
-The repository will retain the source repository's five-file shape:
+The published repository will retain the source repository's five-file shape:
 
 - `README.md` — standalone installation, quick start, operating model, safety notes, failure modes, and license links.
 - `SKILL.md` — the concise Codex skill loaded by an agent when fan-out is appropriate.
@@ -21,8 +21,9 @@ The repository will retain the source repository's five-file shape:
 - `assets/codex-fanout-banner.png` — a Codex-branded adaptation of the source hero banner.
 
 The source repository's Claude Code, CLIProxyAPI, Anthropic, Claude config, and Claude permission terminology will not
-appear in the resulting operational instructions. The repository may also contain the design record under
-`docs/superpowers/specs/` because this workflow requires the approved design to be committed before implementation.
+appear in the resulting operational instructions. The process-only design record under `docs/superpowers/specs/` is
+committed while this work is planned, then removed from the final public tree so the published surface remains
+source-compatible.
 
 ## Codex-specific operating model
 
@@ -51,22 +52,40 @@ The worker contract will mirror the source repository:
 - every brief names the exact files to touch, says “and nothing else,” and says “do not run git”;
 - the orchestrating agent reviews the worker output and performs commits/merges.
 
-The README and skill will show both a single-worker command and the parallelization rules. They will not implement a
-long-running scheduler or daemon.
+The orchestrating agent creates each worktree before dispatch with
+`git worktree add -b <branch> <scratch>/wt-<worker> <base-ref>` and removes it after review with
+`git worktree remove <scratch>/wt-<worker>`. The worker only receives the resulting worktree path; it never creates,
+merges, or removes worktrees. The README and skill will show the single-worker command and parallelization rules. They
+will not implement a long-running scheduler or daemon.
+
+The README and skill will document the same failure contract: a timeout is exit 124; any non-zero worker exit is
+unverified; a missing or empty final-response file is a failed worker; rejected tool calls or sandbox denials must be
+reported; unexpected files, commits, or edits outside the brief are review failures; and the orchestrator must inspect
+`git status` and run tests independently before merging.
 
 ## Verification
 
-The repository will include a small smoke-test path that runs a real `codex exec` worker in a disposable Git worktree.
-Verification will inspect the process exit code, the final-response file, JSONL/log errors, worktree status, and the
-expected worker artifact. The test will prove the actual Codex command shape rather than merely matching documentation
-text. The completed skill will also pass the Codex skill validator.
+The external smoke test will run a real `codex exec` worker in a disposable Git worktree, without adding a scheduler or
+test framework to the published five-file tree. The fixture will contain an `AGENTS.md`, a brief requesting exactly one
+file named `worker-output.txt` with the text `codex-fanout smoke pass`, and a tracked sentinel that must remain
+unchanged. The test will use the documented command with `--ignore-user-config`, `--ephemeral`,
+`--sandbox workspace-write`, `--ask-for-approval never`, `--json`, `--output-last-message`, and `timeout`; it passes
+only when exit status is zero, exit status is not 124, the final-response file is non-empty, no error/denial event is
+present in the JSONL log, the expected file has exact contents, the sentinel is unchanged, and `git status` shows only
+the requested file. A second read-only check will run the published skill validator:
+`python /home/adam/.codex/skills/.system/skill-creator/scripts/quick_validate.py <skill-directory>` and require exit
+status zero.
+
+`SKILL.md` is the normative runtime contract; `README.md` is the standalone public explanation and must keep its
+command, flags, safety model, and failure semantics aligned with `SKILL.md`. The banner is non-executable presentation
+content and will be accepted if it is a readable horizontal Codex Fan-Out image with no Claude/provider branding.
 
 ## Delivery
 
 After implementation and verification:
 
 1. install/copy the skill into the local Codex skills directory for a real harness invocation;
-2. run the smoke test in `/home/adam/CS/sandbox/codex-fanout` and review all generated artifacts;
-3. commit the repository on `main`;
-4. push `main` to `https://github.com/TolongLabs/codex-fanout.git`.
-
+2. run the smoke test from `/home/adam/CS/sandbox/codex-fanout` and review all generated artifacts;
+3. remove the process-only design record from the published tree, while retaining its earlier commit;
+4. commit the repository on `main`;
+5. push `main` to `https://github.com/TolongLabs/codex-fanout.git`.
