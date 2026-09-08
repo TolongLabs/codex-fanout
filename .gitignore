@@ -1,0 +1,5 @@
+reference/
+.worktrees/
+*.log
+*.jsonl
+*.report
