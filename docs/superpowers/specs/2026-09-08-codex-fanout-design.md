@@ -31,7 +31,7 @@ The implementation must use this source-to-Codex mapping:
 | Source concept | Codex-only replacement |
 | --- | --- |
 | Claude Code `claude -p` | `codex exec` |
-| CLIProxyAPI/OpenRouter model catalog | the locally configured Codex model, optionally selected with `-m` |
+| CLIProxyAPI/OpenRouter model catalog | an operator-selected Codex model, required via `-m` |
 | `CLAUDE_CONFIG_DIR` | `--ignore-user-config --ignore-rules` while retaining `CODEX_HOME` authentication |
 | Claude `acceptEdits` | `--sandbox workspace-write` |
 | Claude `--max-turns` | external `timeout 1500` |
@@ -61,7 +61,8 @@ Workers run with `codex exec`, not Claude Code. The documented default invocatio
 - accept the brief through stdin from a file and redirect stdout/stderr to a per-worker log.
 
 `CODEX_HOME` remains the source of authentication. `--ignore-user-config --ignore-rules` is the documented isolation
-mechanism for not loading the operator's normal `config.toml`, MCP servers, user rules, or project rules into workers.
+mechanism for not loading the operator's normal `config.toml`, MCP servers, user rules, or execpolicy project rules
+into workers; project `AGENTS.md` instructions still load from the worktree.
 Because the ignored config also contains the default model, the orchestrator must set `MODEL` explicitly and pass
 `-m "$MODEL"`; the skill will tell the operator to choose a model accepted by the locally authenticated Codex account.
 
@@ -84,11 +85,12 @@ STATUS=$?
 
 `$BRIEF`, `$LOG`, `$ERR`, and `$REPORT` are absolute paths; `$WORKTREE` is the worker's dedicated Git worktree;
 `$MODEL` is required because user config is ignored. The command assumes Codex CLI 0.153.4 or newer and requires
-implementers to re-check `codex exec --help` if the CLI changes.
+implementers to re-check `codex exec --help` if the CLI changes. The exact flag set was verified against
+`codex-cli 0.153.4` during this design review.
 
 The skill will document `--dangerously-bypass-approvals-and-sandbox` only for disposable scratch directories, never as
-the normal repository mode. It will explain that worker model selection is an optional `-m` argument governed by the
-installed Codex CLI, not by a proxy model catalog.
+the normal repository mode. It will explain that worker model selection is a required operator-provided `-m` argument
+governed by the installed Codex CLI, not by a proxy model catalog.
 
 ## Isolation and concurrency
 
@@ -128,8 +130,9 @@ reviewed and cleaned the worktree.
 
 ## Verification
 
-The external smoke test will run a real `codex exec` worker in `/tmp/codex-fanout-smoke-<pid>`, without adding a
-scheduler or test framework to the published five-file tree. Its fixture is exact:
+The external smoke test is an ad-hoc executable shell script at `/tmp/codex-fanout-smoke.sh`, removed after the run. It
+will run a real `codex exec` worker in `/tmp/codex-fanout-smoke-<pid>`, without adding a scheduler or test framework to
+the published five-file tree. Its fixture is exact:
 
 - `AGENTS.md`: “For this smoke test, create only `worker-output.txt` with exactly `codex-fanout smoke pass` followed
   by a newline. Do not edit any other file and do not run git.”
@@ -140,10 +143,12 @@ scheduler or test framework to the published five-file tree. Its fixture is exac
 The test runs `git init -b main`, commits the fixture files, creates worktree
 `/tmp/codex-fanout-smoke-<pid>/wt-smoke` with
 `git worktree add -b smoke-worker /tmp/codex-fanout-smoke-<pid>/wt-smoke main`, then runs the normative command with
-the fixture's `$MODEL`, `$BRIEF`, `$LOG`, `$ERR`, and `$REPORT`; it passes only when exit status is zero, exit status is
-not 124, the final-response file is non-empty, every non-empty `$LOG` line parses as JSON, no parsed event has a type
-of `error` or `turn.failed`, `$ERR` contains no rejected-tool or sandbox-denial text, the expected file has exact
-contents, the sentinel is unchanged, and `git status --porcelain` shows only the requested file. A second read-only
+`MODEL=gpt-5.6-sol` (the locally verified model; an operator may override it with `CODEX_FANOUT_MODEL`), the fixture's
+`$BRIEF`, `$LOG`, `$ERR`, and `$REPORT`; it passes only when exit status is zero, the final-response file is non-empty,
+every non-empty `$LOG` line parses as JSON, no parsed event has a type of `error` or `turn.failed`, and `$ERR` matches
+none of the case-insensitive patterns `rejected a tool call`, `sandbox.*denied`, `permission.*denied`,
+`approval.*required`, or `network.*blocked`; the expected file has exact contents, the sentinel is unchanged, and
+`git status --porcelain` shows only the requested file. A second read-only
 check will run the published skill validator:
 `python /home/adam/.codex/skills/.system/skill-creator/scripts/quick_validate.py /home/adam/.codex/skills/codex-fanout`
 and require exit status zero. The skill is installed for that check by copying the published tree to
