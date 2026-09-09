@@ -3,28 +3,18 @@
 # Codex Fan-Out
 
 ![Codex CLI skill](https://img.shields.io/badge/Codex_CLI_skill-000000?style=for-the-badge)
-![CLIProxyAPI](https://img.shields.io/badge/CLIProxyAPI-000000?style=for-the-badge)
+![Git worktree](https://img.shields.io/badge/Git_worktree-000000?style=for-the-badge)
 ![MIT licence](https://img.shields.io/badge/MIT_licence-blue?style=for-the-badge)
 
-**Fan work out to headless Claude Code workers running a cheap OpenRouter model through CLIProxyAPI, up to six at once.**
+**Fan work out to headless `codex exec` workers in isolated Git worktrees, up to six at once.**
 
 > The worker does the bulk, you keep the judgement.
 
-_Fan-out_ is dispatching many independent workers at once and reviewing what comes back. The Codex CLI coordinator loads this skill and starts the workers; the workers are still Claude Code processes behind the proxy.
+Fan-out is dispatching many independent workers at once and reviewing what comes back. The Codex CLI coordinator loads this skill and starts the workers; each worker is a headless `codex exec` process running in its own Git worktree.
 
-```
-Codex CLI coordinator
-        ↓ loads this skill, writes briefs, starts workers
-shell / env dispatch
-        ↓ env -u ANTHROPIC_API_KEY ... timeout 1500 claude -p ...
-headless Claude Code (claude -p)
-        ↓ ANTHROPIC_BASE_URL + ANTHROPIC_AUTH_TOKEN
-local CLIProxyAPI (port 8317)
-        ↓ upstream request
-OpenRouter model
-```
+![Codex fanout architecture](assets/codex-fanout-diagram.png)
 
-The worker command is `claude -p`. Do not substitute `codex exec`.
+*Codex CLI coordinator writes briefs, dispatches `codex exec` workers into isolated Git worktrees, and reviews the resulting reports.*
 
 ## Table of Contents
 
@@ -32,6 +22,7 @@ The worker command is `claude -p`. Do not substitute `codex exec`.
   <summary>Expand</summary>
   <ol>
     <li><a href="#what-it-does">What It Does</a></li>
+    <li><a href="#installation">Installation</a></li>
     <li><a href="#quick-start">Quick Start</a></li>
     <li><a href="#which-model-to-use">Which Model to Use</a></li>
     <li><a href="#how-it-stays-safe">How It Stays Safe</a></li>
@@ -45,162 +36,169 @@ The worker command is `claude -p`. Do not substitute `codex exec`.
 
 ## What It Does
 
-- **Codex CLI coordinator.** This skill is installed in the Codex CLI skills directory and is invoked as `$codex-fanout`. Codex CLI is the harness that loads the skill, writes the brief, and dispatches the workers.
-- **Headless Claude Code Workers on a Cheap Proxy Model.** Each worker is the full Claude Code agent in one directory, pointed at CLIProxyAPI so it spends a few cents of OpenRouter credit instead of the Claude plan.
-- **You Write the Brief, It Writes the Files, You Review.** The worker reads the repository's `AGENTS.md` and `CLAUDE.md` on its own, so the brief carries the task and not the house rules.
-- **Up to Six at Once.** Launch them in parallel, each with its own brief, log and worktree, and never let two workers write the same file.
-- **A Real Harness.** `claude -p` gives you `--max-turns`, a real exit code and JSON output, and it reads `AGENTS.md` and `CLAUDE.md` on its own.
+- **Codex CLI coordinator.** This skill is installed in the Codex CLI skills directory and is invoked as `$codex-fanout`. Codex CLI is the coordinator: it loads the skill, writes the brief, and dispatches the workers.
+- **Headless `codex exec` workers in isolated Git worktrees.** Each worker is a `codex exec` process in one directory. It writes files inside its worktree and produces a JSONL log and a final report.
+- **You write the brief, it writes the files, you review.** The brief carries the task and any repository-specific rules the worktree does not already state.
+- **Up to six at once.** Launch them in parallel, each with its own brief, log, report, and worktree, and never let two workers write the same file.
+- **Real output and exit codes.** `codex exec` gives you `--json`, a real exit code, `--output-last-message`, and `--sandbox` policies.
 
 If a task needs your judgement or your conversation context, you do not need this skill.
 
+## Installation
+
+Clone into the Codex CLI skills directory, then restart or reload Codex CLI so the skill loads. It is available as `$codex-fanout` from then on.
+
+```bash
+git clone https://github.com/TolongLabs/codex-fanout "${CODEX_HOME:-$HOME/.codex}/skills/codex-fanout"
+```
+
 ## Quick Start
 
-1. **Check the Prerequisites.** You need Codex CLI, Claude Code, CLIProxyAPI installed and configured with at least one OpenRouter model, and `curl` and `jq`.
-
-1. **Clone Into the Global Skills Directory**, then restart or reload Codex CLI so the skill loads. It is available as `$codex-fanout` from then on.
+1. **Check Codex CLI and authentication.** You need `codex` installed, authenticated, plus `jq` and `git`.
 
    ```bash
-   git clone https://github.com/TolongLabs/codex-fanout "${CODEX_HOME:-$HOME/.codex}/skills/codex-fanout"
+   codex --version
+   codex login status
    ```
 
-1. **Bring the Proxy Up and Choose a Model.** Start the proxy if its port is closed, then list the OpenRouter models it serves. Only the `openrouter` block of its config counts. Never print the token, which is a local secret and leaks into transcripts.
+   If you are not logged in, run `codex login`.
+
+2. **Choose a model** from the current Codex catalog:
 
    ```bash
-   CLIPROXY_DIR="${CLIPROXY_DIR:-$HOME/.cli-proxy-api}"
-   CLIPROXY_PORT="${CLIPROXY_PORT:-8317}"
-   CLIPROXY_TOKEN=$(grep -A1 '^api-keys:' "$CLIPROXY_DIR/config.yaml" | tail -1 | tr -d '" -')
-   (exec 3<>"/dev/tcp/127.0.0.1/$CLIPROXY_PORT") 2>/dev/null || {
-     nohup "${CLIPROXY_BIN:-$HOME/.local/opt/cliproxyapi/cli-proxy-api}" -config "$CLIPROXY_DIR/config.yaml" \
-       >> "$CLIPROXY_DIR/proxy.log" 2>&1 & sleep 3
-   }
+   codex debug models | jq -r '.models[].slug'
    ```
 
-   ```bash
-   sed -n '/name: "openrouter"/,/^  - name: "/p' "$CLIPROXY_DIR/config.yaml" | grep -E '^\s+alias:' | tr -d '" ' | cut -d: -f2
-   ```
+   Use a model the user already named in the conversation; otherwise set `MODEL` to one of the slugs above.
 
-   `glm-5.3-flash` is the default. You must pick one before dispatching, and use a model the user already named in the conversation if one exists.
-
-1. **Export the Empty Worker Config, once per machine.** A worker under your normal `~/.claude` loads every plugin, hook and memory you have; an empty config dir avoids that. The worker still reads the repository's `AGENTS.md` and `CLAUDE.md`.
+3. **Create a worktree.** Never dispatch into the main checkout. Replace `main` with your default branch if it is different.
 
    ```bash
-   export CLAUDE_FANOUT_CONFIG="$HOME/.claude-fanout"
-   mkdir -p "$CLAUDE_FANOUT_CONFIG"
-   ```
-
-1. **Give the Worker a Git Worktree, Never Your Checkout.** Then `cd` into it, put the brief in a file, pick a model from the previous step, and dispatch:
-
-   ```bash
+   mkdir -p .worktrees
    git worktree add -b fanout-test ./.worktrees/wt-a main
+   WORKTREE="$(pwd)/.worktrees/wt-a"
+   BRIEF="$WORKTREE/brief.md"
+   REPORT="$WORKTREE/report.md"
+   LOG="$WORKTREE/worker.log"
+   ERR="$WORKTREE/worker.err"
    ```
+
+4. **Write the brief** to `$BRIEF`. It must name every file to edit, say "and nothing else", and say "do not run git".
+
+5. **Dispatch.**
 
    ```bash
-   cd ./.worktrees/wt-a
-
-   env -u ANTHROPIC_API_KEY \
-     CLAUDE_CONFIG_DIR="$CLAUDE_FANOUT_CONFIG" \
-     ANTHROPIC_BASE_URL="http://127.0.0.1:$CLIPROXY_PORT" \
-     ANTHROPIC_AUTH_TOKEN="$CLIPROXY_TOKEN" \
-     timeout 1500 claude -p \
-       --model "$MODEL" \
-       --permission-mode acceptEdits \
-       --max-turns 40 \
-       --output-format json \
-       < "brief.md" \
-       > "worker.log" 2>&1
-   echo "exit=$?"
+   timeout 1500 codex exec \
+     -C "$WORKTREE" \
+     -m "$MODEL" \
+     --ignore-user-config \
+     --ignore-rules \
+     --ephemeral \
+     --sandbox workspace-write \
+     --json \
+     --output-last-message "$REPORT" \
+     - < "$BRIEF" \
+     > "$LOG" 2> "$ERR"
+   STATUS=$?
    ```
 
-   `$MODEL` must be set before you run this. If the user already named a model in the conversation, use it; otherwise `glm-5.3-flash` is the default.
-
-1. **Verify.** The `total_cost_usd` in the JSON result is not the upstream OpenRouter invoice, so never quote it. Read the report, then run the tests yourself, because a green run from a worker proves the worker's tests agree with the worker's code and nothing else:
+6. **Verify.**
 
    ```bash
-   tail -n 1 "worker.log" | jq -r '.result, .num_turns, .permission_denials'
-   git -C ./.worktrees/wt-a status --porcelain
-   grep -c "<structural marker>" <output>
-   grep -rn "/home/\|C:\\\\Users\|/tmp/" <output>
+   test -f "$REPORT"
+   jq -R 'fromjson?' "$LOG" | grep -E '"type":"error"' || true
+   grep -iE "denied|blocked|refused" "$ERR" || true
+   git -C "$WORKTREE" status --porcelain
+   <run the relevant test command in "$WORKTREE">
+   grep -RIn -E '/home/|C:\\Users|/tmp/' "$WORKTREE"
    ```
+
+The cost or token metadata in the JSONL log is not an invoice. Do not quote it.
 
 ## Which Model to Use
 
-Only models in the `openrouter` block of the proxy config are offered, and `glm-5.3-flash` is the default. Any of these is cheap enough to be a worker; prices are OpenRouter's on 2026-09-07, so re-check before relying on one. `SKILL.md` shows the three lines that add one to the proxy.
+The Codex catalog depends on the current account. Inspect it before choosing:
 
-| OpenRouter id                       | Input / output per 1M tokens | Context | Notes                                    |
-| ----------------------------------- | ---------------------------- | ------- | ---------------------------------------- |
-| `z-ai/glm-5.3-flash`                | $0.075 / $0.25               | 1.3M    | The default; measured in this file       |
-| `qwen/qwen3.7-flash`                | $0.03 / $0.13                | 1M      | Cheapest capable option                  |
-| `deepseek/deepseek-v4-flash`        | $0.08 / $0.16                | 1M      | Cheap output, long context               |
-| `qwen/qwen3-coder-30b-a3b-instruct` | $0.07 / $0.28                | 262k    | Coder-tuned                              |
-| `google/gemini-2.5-flash-lite`      | $0.10 / $0.40                | 1M      | Fast                                     |
-| `minimax/minimax-m3`                | $0.30 / $1.20                | 1M      | The step-up when flash models fall short |
+```bash
+codex debug models | jq -r '.models[].slug'
+```
+
+Use a model the user already named as the standing choice. If none is named, `gpt-5.6-sol` is one example of a capable slug, but only choose it if it appears in the list for the current account. Otherwise pick a slug that `codex debug models` actually lists.
+
+Do not hard-code a model from a different catalog. The worker gets its model from `-m "$MODEL"` because `--ignore-user-config` is set.
 
 ## How It Stays Safe
 
-A worker writes files under one of three permission modes:
+A worker runs under one of three sandbox modes:
 
-| Mode                | Auto-Approves                   | Use When                                                                  |
-| ------------------- | ------------------------------- | ------------------------------------------------------------------------- |
-| `acceptEdits`       | Reads and edits in the cwd      | **The default.** Files only; every Bash command is refused unless allowed |
-| `bypassPermissions` | Everything                      | Only in a scratch directory or worktree you will throw away               |
-| `default`           | Nothing; every prompt is denied | Read-only analysis. Anything not allowed is refused, and it carries on    |
+| Flag / mode                                  | What it allows                              | Use when                                                                  |
+| -------------------------------------------- | ------------------------------------------- | ------------------------------------------------------------------------- |
+| `--sandbox read-only`                        | Reads the workspace; no writes              | Analysis, summaries, inventories                                          |
+| `--sandbox workspace-write`                  | Edits inside the workspace                  | **The default.** Files in the worktree only; shell commands stay sandboxed |
+| `--dangerously-bypass-approvals-and-sandbox` | Runs commands without approval or sandbox   | Only in a scratch directory or worktree you will throw away               |
 
-- **Give a Worker a `git worktree`, Never Your Checkout.** A half-done or looping run then costs one worktree removal, not a reconstruction, and two workers never share a working tree.
-- **Say `do not run git` in Every Brief.** The worker can, and a commit from a worker is a commit nobody reviewed.
-- **Add `--allowedTools` Narrowly if a Command Is Required.** `acceptEdits` refuses Bash by default. Add something like `--allowedTools "Bash(bun test:*)"` for the one command the brief needs, and nothing wider.
+- **Give a worker a Git worktree, never your checkout.** A half-done or looping run then costs one worktree removal, not a reconstruction, and two workers never share a working tree.
+- **Say `do not run git` in every brief.** The worker can, and a commit from a worker is a commit nobody reviewed.
+- **Never add interactive approval flags to a headless command.** Flags like `--approve-for-me` require an interactive terminal.
+- **Never give two workers overlapping files.** Each gets its own worktree and its own brief.
 
 ## What It Cannot Do
 
-- **The Cost Figure Is Not the Upstream Invoice.** The JSON result reports `total_cost_usd` as if Anthropic served the model; the real cost is on the proxy's upstream. Never quote it.
-- **The System Prompt Is Not Free.** A worker under your normal config dir loads every plugin and hook you have. In the source repo this measured 105,726 input tokens per turn against 19,027 with an empty one, and twice the wall time.
-- **Six Concurrent Workers Is the Ceiling.** Past that they contend for the same files and the review cost exceeds the saving.
-- **A Proxy Error Costs About Three Minutes.** On one, Claude Code retries until it gives up, and a looping worker burns `--max-turns` worth of credit, which is why every dispatch wraps in `timeout`.
-- **A Worker Has None of Your Context.** Everything it needs goes in the brief, and if the brief takes longer to write than the task takes to do, do the task.
+- **The cost figure is not the upstream invoice.** The JSONL log may contain token or cost metadata; that is diagnostic, not a bill. Never quote it.
+- **A worker has none of your context.** Everything it needs goes in the brief, and if the brief takes longer to write than the task takes to do, do the task.
+- **Six concurrent workers is the ceiling.** Past that they contend for the same files and the review cost exceeds the saving.
+- **A hung worker can burn the full timeout.** On a bad call, `codex exec` may retry; a looping worker burns the full budget. Wrap every dispatch in `timeout`.
+- **It does not replace your judgement.** Review every output before you treat it as done.
 
-## Under the Hood
+## Under The Hood
 
-Every worker is one command, and every failure shows up around it:
+Every worker is one command, and every failure shows up around it.
 
 <details>
 <summary><b>The Dispatch Command</b></summary>
 
 ```bash
-env -u ANTHROPIC_API_KEY \
-  CLAUDE_CONFIG_DIR="$CLAUDE_FANOUT_CONFIG" \
-  ANTHROPIC_BASE_URL="http://127.0.0.1:$CLIPROXY_PORT" \
-  ANTHROPIC_AUTH_TOKEN="$CLIPROXY_TOKEN" \
-  timeout 1500 claude -p \
-    --model "$MODEL" \
-    --permission-mode acceptEdits \
-    --max-turns 40 \
-    --output-format json \
-    < "<path to the brief>" \
-    > "<log path>" 2>&1
-echo "exit=$?"
+timeout 1500 codex exec \
+  -C "$WORKTREE" \
+  -m "$MODEL" \
+  --ignore-user-config \
+  --ignore-rules \
+  --ephemeral \
+  --sandbox workspace-write \
+  --json \
+  --output-last-message "$REPORT" \
+  - < "$BRIEF" \
+  > "$LOG" 2> "$ERR"
+STATUS=$?
 ```
 
-- **`-p` Reads the Brief From stdin.** Put the brief in a file; an inline prompt of any length is shell-quoting archaeology.
-- **`cd` Into the Working Directory First.** The worker's world is its cwd: that is where it reads `AGENTS.md` and `CLAUDE.md`, and where relative paths in the brief resolve.
-- **Always Redirect to a Log File.** The JSON result is the last line, several kilobytes long, and stderr warnings come before it. Read it with `tail -n 1`, never `tail -c`.
-- **Always Wrap in `timeout`.** On a proxy error Claude Code retries for about three minutes before giving up, and a looping worker burns `--max-turns` worth of credit. Exit 124 means the timeout fired.
-- **`--max-turns` Is the Budget.** Forty is enough for a multi-file edit with tests; ten for a single-file rewrite.
-- **`$MODEL` Is Required.** `glm-5.3-flash` is the default, but you must choose one before dispatching and use a model the user explicitly named in the conversation if one exists.
+- **`-C "$WORKTREE"`** selects the worker cwd. It must be an isolated Git worktree given as an absolute path.
+- **`-m "$MODEL"`** is explicit because `--ignore-user-config` ignores the coordinator's default model.
+- **`--ignore-user-config`** and **`--ignore-rules`** make the worker run with the repository rules that are in the brief only.
+- **`--ephemeral`** prevents session files from being persisted to disk.
+- **`--sandbox workspace-write`** is the normal worker sandbox: it can write files inside the worktree but not escape it.
+- **`--json`** emits JSONL on stdout.
+- **`--output-last-message "$REPORT"`** writes the worker's final message to a report file.
+- **`- < "$BRIEF"`** reads the brief from a file on stdin. Put the brief in a file; inline prompts are shell-quoting archaeology.
+- **`> "$LOG" 2> "$ERR"`** captures stdout and stderr separately.
+- **`timeout`** protects against a worker that hangs on a long call or retry loop. Exit 124 means the timeout fired.
 
 </details>
 
 <details>
 <summary><b>Failure Modes</b></summary>
 
-| Symptom                                                  | Cause And Fix                                                                                    |
+| Symptom                                                  | Cause and fix                                                                                    |
 | -------------------------------------------------------- | ------------------------------------------------------------------------------------------------ |
-| `auth_unavailable: no auth available (providers=...)`    | You named a model outside the `openrouter` block, and its login is dead. Use an OpenRouter alias |
-| Exit 124, `terminal_reason":"api_error`, nothing written | The proxy rejected every call and the harness retried until the timeout. Fix the proxy first     |
-| `[claude-code:unrecognized_model]` on stderr             | Harmless. Claude Code does not know the proxy model's name; the call still goes through          |
-| `claude.ai connectors are disabled` on stderr            | Harmless. `ANTHROPIC_AUTH_TOKEN` takes precedence over the login, which is the point             |
-| Every turn costs ~100k input tokens                      | The worker ran under your normal config dir. Set `CLAUDE_CONFIG_DIR` to the empty one            |
-| Stray files or a commit in the repo                      | The brief did not say "and nothing else" or "do not run git". `git status` after every run       |
-| `permission_denials` is non-empty                        | `acceptEdits` refused a command. Either allow it with `--allowedTools` or do that step yourself  |
-| Model id rejected by the proxy                           | Catalogue drift. Re-list `/v1/models` rather than retrying the same id                           |
+| Exit 124 and nothing written                             | The timeout fired. The worker hung or retried. Read `$ERR` and `$LOG` for the cause              |
+| `denied`, `blocked`, or `refused` in `$ERR`              | The sandbox refused a command. Either run the command yourself or adjust the brief               |
+| Report file missing                                      | The worker exited before the final message. Check `$LOG` and `$ERR` for the failure event        |
+| JSONL contains error events                              | A tool call or model error happened during the run. Read the events in `$LOG`                    |
+| `git status` shows unexpected files or a commit          | The brief did not say "and nothing else" or "do not run git". Check after every run              |
+| `permission_denials` or sandbox refusals in the JSONL    | `workspace-write` refused a command outside the worktree. Keep the worker inside its worktree    |
+| Model slug rejected by Codex                             | Catalogue drift. Re-list `codex debug models` rather than retrying the same slug                 |
+| Stray machine paths in the deliverable                   | The brief did not say "read them, never mention their paths in your output". Filter before review |
+| Worker wrote outside its worktree                        | The worktree path was not absolute or the wrong sandbox was used. Use `-C` with an absolute path  |
 
 </details>
 
@@ -216,4 +214,24 @@ Issues and pull requests are welcome.
 
 ## Licence
 
-[MIT](LICENSE). Copyright 2026 TolongLabs.
+MIT License
+
+Copyright (c) 2026 TolongLabs
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
