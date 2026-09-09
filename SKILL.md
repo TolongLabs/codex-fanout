@@ -1,13 +1,29 @@
 ---
 name: codex-fanout
-description: "Use when a task splits into independent chunks that need a capable model but not your judgement, so you can fan the work out to headless Codex CLI workers running from isolated Git worktrees, up to 6 at once."
+description: "Fan work out to headless Claude Code workers running a cheap OpenRouter model through CLIProxyAPI, up to 6 at once. This skill is loaded and invoked by the Codex CLI coordinator; the workers are Claude Code processes behind the proxy. Use when a task splits into independent chunks that need a capable model but not your judgement. Requires the proxy to be up and a model chosen before dispatching."
 ---
 
 # Codex Fan-Out
 
-Dispatch headless `codex exec` runs as background workers from isolated Git worktrees. Each worker is the Codex CLI agent in one directory; you write the brief, it writes the files, you review.
+Codex CLI is the harness that loads and invokes this skill. The fan-out workers are still headless Claude Code runs, pointed at CLIProxyAPI so they spend a few cents of OpenRouter credit instead of the Claude plan.
 
-**Why `codex exec`.** The harness gives you a real exit code, JSONL output, and it reads `AGENTS.md` on its own, so briefs carry the task and not the house rules.
+```
+Codex CLI coordinator
+        ↓ loads this skill, writes briefs, starts workers
+shell / env dispatch
+        ↓ env -u ANTHROPIC_API_KEY ... timeout 1500 claude -p ...
+headless Claude Code (claude -p)
+        ↓ ANTHROPIC_BASE_URL + ANTHROPIC_AUTH_TOKEN
+local CLIProxyAPI (port 8317)
+        ↓ upstream request
+OpenRouter model
+```
+
+The worker command is `claude -p`. Do not substitute `codex exec`: the workers are Claude Code processes behind the proxy, not Codex CLI children.
+
+Each worker is the full Claude Code agent in one directory; you write the brief, it writes the files, you review.
+
+**Why headless Claude Code.** The `claude -p` harness gives you `--max-turns`, a real exit code, JSON output, and it reads `AGENTS.md` and `CLAUDE.md` on its own, so briefs carry the task and not the house rules.
 
 **Six concurrent workers is the ceiling.** Past that they contend for the same files and the review cost exceeds the saving.
 
@@ -29,30 +45,64 @@ Dispatch headless `codex exec` runs as background workers from isolated Git work
 
 ## Preflight, In Order
 
-**1. Check the Codex CLI and authentication.** The worker needs a local Codex install and a logged-in account. `CODEX_HOME` (default `~/.codex`) holds authentication and state; do not share credentials in briefs or logs.
+**1. Bring the proxy up and get its token.** No shell alias is involved; these are the raw pieces.
 
 ```bash
-codex --version
-codex login status
+CLIPROXY_DIR="${CLIPROXY_DIR:-$HOME/.cli-proxy-api}"
+CLIPROXY_PORT="${CLIPROXY_PORT:-8317}"
+CLIPROXY_TOKEN=$(grep -A1 '^api-keys:' "$CLIPROXY_DIR/config.yaml" | tail -1 | tr -d '" -')
+(exec 3<>"/dev/tcp/127.0.0.1/$CLIPROXY_PORT") 2>/dev/null || {
+  nohup "${CLIPROXY_BIN:-$HOME/.local/opt/cliproxyapi/cli-proxy-api}" -config "$CLIPROXY_DIR/config.yaml" \
+    >> "$CLIPROXY_DIR/proxy.log" 2>&1 & sleep 3
+}
 ```
 
-If `codex login status` is non-zero, run `codex login`.
+Never print the token. It is a local secret and it leaks into transcripts.
 
-**2. Choose a model.** Because the worker runs with `--ignore-user-config --ignore-rules`, it does not load your default model from `config.toml`. You must pass `-m "$MODEL"` and the value must be a model accepted by the authenticated Codex account. List options with:
+**2. List the OpenRouter models the proxy serves.** Only the `openrouter` block of `config.yaml` counts. The proxy also serves whatever OAuth logins it holds, and those are not worker models: they are not cheap, and a dead login fails every call.
 
 ```bash
-codex debug models | jq -r '.models[].slug'
+sed -n '/name: "openrouter"/,/^  - name: "/p' "$CLIPROXY_DIR/config.yaml" | grep -E '^\s+alias:' | tr -d '" ' | cut -d: -f2
 ```
 
-Pick one before dispatching. `gpt-5.6-sol` is a known capable starting point if your account offers it.
+**3. Ask the user which model to use, unless they already named one.** In Codex, ask one concise question in the normal conversation, with the default first, offering only aliases listed in step 2. A model the user named earlier in the same conversation is a standing answer: state it back and dispatch.
 
-**3. Create the worker's Git worktree.** The orchestrator (you) creates and removes worktrees; the worker only receives the path.
+- **`glm-5.3-flash`** - the default. Fast, cheap, and the one every measurement in this file was taken on
+- Anything else in the list, by its alias
+
+You must choose a model before dispatching.
+
+**Adding a cheap worker model.** Every model below supports tool calls and a large context, and costs under a dollar per million output tokens. Prices are OpenRouter's on 2026-09-07; re-check before relying on one.
+
+| OpenRouter id                       | Input / output per 1M tokens | Context | Notes                                    |
+| ----------------------------------- | ---------------------------- | ------- | ---------------------------------------- |
+| `z-ai/glm-5.3-flash`                | $0.075 / $0.25               | 1.3M    | The default; measured in this file       |
+| `qwen/qwen3.7-flash`                | $0.03 / $0.13                | 1M      | Cheapest capable option                  |
+| `deepseek/deepseek-v4-flash`        | $0.08 / $0.16                | 1M      | Cheap output, long context               |
+| `qwen/qwen3-coder-30b-a3b-instruct` | $0.07 / $0.28                | 262k    | Coder-tuned                              |
+| `google/gemini-2.5-flash-lite`      | $0.10 / $0.40                | 1M      | Fast                                     |
+| `minimax/minimax-m3`                | $0.30 / $1.20                | 1M      | The step-up when flash models fall short |
+
+To add one, append it under the `openrouter` block's `models:` list in `config.yaml` and restart the proxy:
+
+```yaml
+      - name: "qwen/qwen3.7-flash"
+        alias: "qwen3.7-flash"
+        display-name: "Qwen3.7 Flash"
+```
 
 ```bash
-git worktree add -b <branch> <scratch>/wt-<chunk> <base-ref>
+kill "$(cat "$CLIPROXY_DIR/proxy.pid")" 2>/dev/null; pkill -x cli-proxy-api; sleep 1   # then run step 1 again
 ```
 
-Use an absolute path for the worktree. Create the directories that will hold `$LOG`, `$ERR`, and `$REPORT` as well.
+**4. Give workers their own config dir, once per machine.** A worker under your normal `~/.claude` loads every plugin and hook you have: measured 105,726 input tokens per turn against 19,027 with an empty config dir, and twice the wall time. DKM and claude-mem also fire inside the worker, which you do not want.
+
+```bash
+export CLAUDE_FANOUT_CONFIG="$HOME/.claude-fanout"
+mkdir -p "$CLAUDE_FANOUT_CONFIG"
+```
+
+An empty directory is a complete config: no plugins, no hooks, no memory. The worker still reads the repository's `CLAUDE.md` and `AGENTS.md` from the working directory.
 
 ---
 
@@ -61,55 +111,52 @@ Use an absolute path for the worktree. Create the directories that will hold `$L
 ### The Command
 
 ```bash
-timeout 1500 codex exec \
-  -C "$WORKTREE" \
-  -m "$MODEL" \
-  --ignore-user-config \
-  --ignore-rules \
-  --ephemeral \
-  --sandbox workspace-write \
-  --json \
-  --output-last-message "$REPORT" \
-  - < "$BRIEF" \
-  > "$LOG" 2> "$ERR"
-STATUS=$?
+env -u ANTHROPIC_API_KEY \
+  CLAUDE_CONFIG_DIR="$CLAUDE_FANOUT_CONFIG" \
+  ANTHROPIC_BASE_URL="http://127.0.0.1:$CLIPROXY_PORT" \
+  ANTHROPIC_AUTH_TOKEN="$CLIPROXY_TOKEN" \
+  timeout 1500 claude -p \
+    --model "$MODEL" \
+    --permission-mode acceptEdits \
+    --max-turns 40 \
+    --output-format json \
+    < "<path to the brief>" \
+    > "<log path>" 2>&1
+echo "exit=$?"
 ```
 
-- `$BRIEF`, `$LOG`, `$ERR`, and `$REPORT` are absolute paths.
-- `$WORKTREE` is the worker's dedicated Git worktree.
-- `$MODEL` is required because user config is ignored.
-- The command assumes Codex CLI 0.153.4 or newer. Re-check `codex exec --help` if the CLI changes.
-- Do not add `--ask-for-approval` to `codex exec`; it is interactive-only and invalid here.
+- **`-p` reads the brief from stdin.** Put the brief in a file; an inline prompt of any length is shell-quoting archaeology
+- **`cd` into the working directory first.** The worker's world is its cwd: that is where it reads `AGENTS.md` and `CLAUDE.md`, and where relative paths in the brief resolve
+- **Always redirect to a log file.** The JSON result is the last line, several kilobytes long; stderr warnings come before it. Read it with `tail -n 1`, never `tail -c`
+- **Always wrap in `timeout`.** On a proxy error Claude Code retries for about three minutes before giving up, and a looping worker burns `--max-turns` worth of credit. Exit 124 means the timeout fired
+- **`--max-turns` is the budget.** Forty is enough for a multi-file edit with tests; ten for a single-file rewrite
+- **`$MODEL` is required.** The default is `glm-5.3-flash`, but you must choose a model before dispatching, and use a model the user explicitly named when one already exists in the conversation
 
-### What the flags do
+### Choosing `--permission-mode`
 
-- **`-C` sets the working directory** to the worktree. The worker's world is its cwd: that is where it reads `AGENTS.md` and where relative paths in the brief resolve.
-- **`-m` sets the model explicitly.** It is required because `--ignore-user-config` also discards your default model.
-- **`--ignore-user-config` and `--ignore-rules`** keep your `config.toml`, MCP servers, user rules, and project execpolicy `.rules` files out of the worker; `AGENTS.md` in the worktree still loads.
-- **`--ephemeral`** avoids persistent worker sessions.
-- **`--sandbox workspace-write`** allows file edits in the workspace and is the normal mode.
-- **`--json`** emits JSONL events, one per line.
-- **`--output-last-message`** writes the final response to `$REPORT`.
+| Mode                | Auto-approves                   | Use When                                                                  |
+| ------------------- | ------------------------------- | ------------------------------------------------------------------------- |
+| `acceptEdits`       | Reads and edits in the cwd      | **The default.** Files only; every Bash command is refused unless allowed |
+| `bypassPermissions` | Everything                      | Only in a scratch directory or worktree you will throw away               |
+| `default`           | Nothing; every prompt is denied | Read-only analysis. Anything not allowed is refused, and it carries on    |
 
-### Choosing `--sandbox`
+`acceptEdits` refuses every Bash command, measured: a worker's three `awk` line-width checks were all denied. Add `--allowedTools "Bash(bun test:*)"` for the commands a brief asks the worker to run, and nothing wider.
 
-| Mode / flag                                         | Auto-approves                   | Use When                                                                  |
-| --------------------------------------------------- | ------------------------------- | ------------------------------------------------------------------------- |
-| `workspace-write`                                   | Reads and writes in the cwd     | **The default.** Files only; every Bash command is sandboxed              |
-| `--dangerously-bypass-approvals-and-sandbox`        | Everything                      | Only in a scratch directory or worktree you will throw away               |
-| `read-only`                                         | Nothing; every prompt is denied | Read-only analysis. Anything not allowed is refused, and it carries on    |
+**Give a worker a `git worktree`, never your checkout.** A half-done or looping run then costs one worktree removal, not a reconstruction, and two workers never share a working tree:
 
-`workspace-write` can still refuse a Bash command that tries to leave the workspace or touch disallowed paths. Either rephrase the brief, use `--add-dir` for an explicit extra directory, or do that step yourself.
+```bash
+git worktree add -b <branch> <scratch>/wt-<chunk> main
+```
 
 ### Parallel, Up To Six
 
-Start at most six background copies of the command. Each gets its own brief file, its own log, its own error file, its own report, and its own worktree. **Never let two workers write the same file.**
+Start at most six background copies of the `claude -p` command. Each gets its own brief file, its own log, its own worktree or output paths. **Never let two workers write the same file.**
 
 Wait for all processes to finish before reviewing; do not poll.
 
 ### Sequential
 
-Chain one worker at a time when later chunks depend on earlier output, or when workers touch overlapping files. One log per stage, and a failure stops the chain.
+Chain in one shell command when later chunks depend on earlier output, or when workers touch overlapping files. One log per stage, `&&` between them, so a failure stops the chain.
 
 **Prefer parallel.** Sequential is for real dependencies, not for tidiness.
 
@@ -119,12 +166,12 @@ Chain one worker at a time when later chunks depend on earlier output, or when w
 
 A worker prompt is a work order. Six things, and the first two are what actually prevent damage:
 
-1. **Name every file to create or edit, and say "and nothing else".** Without it you get stray scratch files.
-2. **State inputs as paths inside the working directory**, and if the output is committed, say "read them, never mention their paths in your output" — otherwise machine paths leak into the deliverable.
-3. **Give the output format concretely.** Heading levels, table columns, casing. "Well structured" produces whatever the model likes today.
-4. **Carry in the house rules the repository does not already state.** The worker reads `AGENTS.md` itself; repeat only what is specific to this job.
-5. **Say what must be preserved verbatim** when the task is a transformation. Models summarise by reflex.
-6. **Ask for a short report** — what it wrote, what it could not do, what it guessed at. It arrives in `$REPORT`.
+1. **Name every file to create or edit, and say "and nothing else".** Without it you get stray scratch files
+2. **State inputs as paths inside the working directory**, and if the output is committed, say "read them, never mention their paths in your output" - otherwise machine paths leak into the deliverable
+3. **Give the output format concretely.** Heading levels, table columns, casing. "Well structured" produces whatever the model likes today
+4. **Carry in the house rules the repository does not already state.** The worker reads `AGENTS.md` and `CLAUDE.md` itself; repeat only what is specific to this job
+5. **Say what must be preserved verbatim** when the task is a transformation. Models summarise by reflex
+6. **Ask for a short report** - what it wrote, what it could not do, what it guessed at. It arrives as the `result` field of the JSON line at the end of the log
 
 Say **"do not run git"** in every brief. The worker can, and a commit from a worker is a commit nobody reviewed.
 
@@ -132,16 +179,15 @@ Say **"do not run git"** in every brief. The worker can, and a commit from a wor
 
 ## Verifying, Which Is Not Optional
 
-The cost or token metadata in the JSONL is the CLI's own view and may not match your invoice. **Do not quote it as fact.**
+The JSON result reports `total_cost_usd` as if Anthropic served the model. **It is not the upstream OpenRouter invoice.** Real cost is on the proxy's upstream. Never quote it.
 
 Check, in this order:
 
 ```bash
-test -s "$REPORT"                                                     # final response exists and is non-empty
-jq -e -c . < "$LOG" > /dev/null                                       # every stdout line is valid JSON
-jq -e -s 'all(.[]; ((.type // "") != "error" and (.type // "") != "turn.failed"))' "$LOG" > /dev/null
-! grep -iE -q 'rejected a tool call|sandbox.*denied|permission.*denied|approval.*required|network.*blocked' "$ERR"
-git -C "$WORKTREE" status --porcelain                                 # what actually changed, including strays
+tail -n 1 "$LOG" | jq -r '.result, .num_turns, .permission_denials'      # its report, turns, refusals
+git -C <worktree> status --porcelain                                   # what actually changed, including strays
+grep -c "<structural marker>" <output>                                 # right shape, right count
+grep -rn "/home/\|C:\\\\Users\|/tmp/" <output>                         # no machine paths leaked
 ```
 
 Then **read the parts that carry risk**, run the tests yourself, and mutation-test any test the worker wrote. A green run from a worker proves the worker's tests agree with the worker's code and nothing else.
@@ -152,36 +198,21 @@ Fix small defects yourself. Re-dispatch only if a chunk is broadly wrong, with t
 
 ## Failure Modes Seen In The Wild
 
-| Symptom                                                   | Cause And Fix                                                                                      |
-| --------------------------------------------------------- | -------------------------------------------------------------------------------------------------- |
-| Exit 124                                                  | The 1500-second wall-clock timeout fired. A stuck worker can still spend model quota until then.   |
-| Non-zero exit, or missing/empty `$REPORT`                 | The run failed or was killed. Do not merge; inspect `$LOG` and `$ERR`.                             |
-| `rejected a tool call`, `sandbox.*denied`, or `permission.*denied` in `$ERR` | `--sandbox workspace-write` refused a command. Rephrase, use `--add-dir`, or do that step yourself. |
-| Unexpected files or a commit in the worktree              | The brief did not say "and nothing else" or "do not run git". `git status` after every run.        |
-| Every turn costs many tokens                              | The worker did not run with `--ignore-user-config --ignore-rules`. Check the flags.                |
-| Model id rejected by the CLI                              | The value passed to `-m` is not accepted by the local Codex account. Re-check `codex debug models`. |
-| `network.*blocked` in `$ERR`                              | The worker's environment or sandbox blocked a network call the brief required.                     |
+| Symptom                                                  | Cause And Fix                                                                                    |
+| -------------------------------------------------------- | ------------------------------------------------------------------------------------------------ |
+| `auth_unavailable: no auth available (providers=...)`    | You named a model outside the `openrouter` block, and its login is dead. Use an OpenRouter alias |
+| Exit 124, `terminal_reason":"api_error`, nothing written | The proxy rejected every call and the harness retried until the timeout. Fix the proxy first     |
+| `[claude-code:unrecognized_model]` on stderr             | Harmless. Claude Code does not know the proxy model's name; the call still goes through          |
+| `claude.ai connectors are disabled` on stderr            | Harmless. `ANTHROPIC_AUTH_TOKEN` takes precedence over the login, which is the point             |
+| Every turn costs ~100k input tokens                      | The worker ran under your normal config dir. Set `CLAUDE_CONFIG_DIR` to the empty one            |
+| Stray files or a commit in the repo                      | The brief did not say "and nothing else" or "do not run git". `git status` after every run       |
+| `permission_denials` is non-empty                        | `acceptEdits` refused a command. Either allow it with `--allowedTools` or do that step yourself  |
+| Model id rejected by the proxy                           | Catalogue drift. Re-list `/v1/models` rather than retrying the same id                           |
 
 ---
 
 ## Reporting Back
 
-Say which model ran, how many workers, what each produced, **and what you corrected**. The corrections are the useful part — they tell the user whether the next fan-out should use a stronger model or a tighter brief.
+Say which model ran, how many workers, what each produced, **and what you corrected**. The corrections are the useful part - they tell the user whether the next fan-out should use a stronger model or a tighter brief.
 
 Never present a worker's output as verified when you only checked that the file exists.
-
----
-
-## Git Worktree Lifecycle
-
-The orchestrator creates the worktree before dispatch and removes it after review:
-
-```bash
-# before
-git worktree add -b <branch> <scratch>/wt-<chunk> <base-ref>
-
-# after successful review
-git worktree remove <scratch>/wt-<chunk>
-```
-
-The worker never creates, merges, or removes worktrees. Do not merge a worktree whose verification failed. On failure, preserve `$LOG`, `$ERR`, and `$REPORT` for diagnosis, then remove the disposable worktree or re-run with a corrected brief; retries are explicit, not automatic.
