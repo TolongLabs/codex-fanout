@@ -117,15 +117,18 @@ The cost or token metadata in the JSONL log is not an invoice. Do not quote it.
 
 ## Which Model to Use
 
-The Codex catalog depends on the current account. Inspect it before choosing:
+Only models in the `openrouter` block of the proxy config are offered, and `glm-5.3-flash` is the default: every
+measurement in this README was taken on it. Any of these is cheap enough to be a worker; prices are OpenRouter's on
+2026-09-07, so re-check before relying on one.
 
-```bash
-codex debug models | jq -r '.models[].slug'
-```
-
-Use a model the user already named as the standing choice. If none is named, `gpt-5.6-sol` is one example of a capable slug, but only choose it if it appears in the list for the current account. Otherwise pick a slug that `codex debug models` actually lists.
-
-Do not hard-code a model from a different catalog. The worker gets its model from `-m "$MODEL"` because `--ignore-user-config` is set.
+| OpenRouter id                       | Input / output per 1M tokens | Context | Notes                                    |
+| ----------------------------------- | ---------------------------- | ------- | ---------------------------------------- |
+| `z-ai/glm-5.3-flash`                | $0.075 / $0.25               | 1.3M    | The default; measured in this file       |
+| `qwen/qwen3.7-flash`                | $0.03 / $0.13                | 1M      | Cheapest capable option                  |
+| `deepseek/deepseek-v4-flash`        | $0.08 / $0.16                | 1M      | Cheap output, long context               |
+| `qwen/qwen3-coder-30b-a3b-instruct` | $0.07 / $0.28                | 262k    | Coder-tuned                              |
+| `google/gemini-2.5-flash-lite`      | $0.10 / $0.40                | 1M      | Fast                                     |
+| `minimax/minimax-m3`                | $0.30 / $1.20                | 1M      | The step-up when flash models fall short |
 
 ## How It Stays Safe
 
