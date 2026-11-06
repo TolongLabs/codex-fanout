@@ -177,6 +177,25 @@ Fix small defects yourself. Re-dispatch only if a chunk is broadly wrong, with t
 | Model slug rejected by Codex                             | Catalogue drift. Re-list `codex debug models` rather than retrying the same slug                 |
 | Stray machine paths in the deliverable                   | The brief did not say "read them, never mention their paths in your output". Filter before review |
 | Worker wrote outside its worktree                        | The worktree path was not absolute or the wrong sandbox was used. Use `-C` with an absolute path  |
+| Worker runs at the wrong reasoning effort                | `--ignore-user-config` drops the configured effort too. Pass `-c model_reasoning_effort=high`     |
+| Exit 124 on a whole feature issue                        | 1500 s is too short for one issue. Use `timeout 5400` or more, or split the issue                  |
+
+---
+
+## Whole-Issue Runs In A Code Repo
+
+These lessons come from fanning out whole feature issues in a Next.js monorepo, with up to 10 workers at once.
+
+- **Memory is the real limit.** A worker that runs `next build` or Playwright uses gigabytes. Ten at once on a 15 GiB machine got processes killed. Run at most 3 to 6 heavy workers. Tell workers not to run the build or the e2e suite; the coordinator runs those, one at a time.
+- **Verify on a quiet machine.** Under load, cold-import unit tests time out and e2e servers drop connections. Re-run a failure alone before you believe it, and before you blame the worker.
+- **A worker's green is not CI's green.** Run the project's CI commands yourself, in order, and read every exit code. Do not trust nektos `act` alone: a job that depends on a skipped `changes` job is skipped too, and `act` still prints "Job succeeded".
+- **Forbid report files.** Workers write `REPORT.md` or plan files into the repo. Say "do not write report or notes files into the repo". The report belongs in the final message.
+- **Resume, do not restart.** A worker that times out mid-issue leaves its edits in the worktree. Commit them as a WIP commit, rebase onto the current base, then send a continuation brief: "A previous run timed out. Its edits are already here. Keep what is correct and finish. Do not start over."
+- **Do not restore work with `git stash pop`.** On a base that moved, it leaves conflict markers, and the next worker builds on them. Use a WIP commit and a rebase, and resolve conflicts before the worker starts.
+- **Shared lists conflict on every merge.** When each worker adds itself to one list (a test config, a registry count), merge both sides' entries, then re-run the checks. Do not take one side.
+- **Check commit rules before committing worker output.** For example, commitlint may cap the header at 50 characters.
+- **Stop workers by PID, not by pattern.** `pkill -f <pattern>` also matches the shell that runs it. Kill the process tree by PID.
+- **Run long queues detached.** Start a long verification queue with `setsid nohup` and follow its log. A watcher that owns the queue kills it when the watcher expires.
 
 ---
 
